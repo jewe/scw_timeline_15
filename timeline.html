@@ -1,0 +1,1027 @@
+<!DOCTYPE html>
+<meta charset="utf-8">
+<style>
+
+body {
+  font-family: Alegreya, Helvetica;
+  background: #fff;
+}
+
+svg {
+  padding: 20px;
+  //background: #eed;
+}
+
+div.tooltip {
+  position: absolute;
+  text-align: center;
+  width: 200px;
+  //height: 80px;
+  padding: 2px;
+  font: 9px sans-serif;
+  background: lightsteelblue;
+  border: 0px;
+  border-radius: 3px;
+  pointer-events: none;
+}
+
+.gridlines line {
+  stroke: #aaa995;
+  stroke-dasharray: 20,20;
+  shape-rendering: crispEdges;
+}
+
+.x-axis line {
+  display: none;
+}
+.x-axis path {
+  display: none;
+}
+.x-axis text {
+  opacity: .5;
+}
+
+
+</style>
+
+<svg class="timeline" width="23740" height="2846"></svg>
+<canvas id="canvas"  width="300" height="200" style="display:none"></canvas>
+
+<script src="js/d3.v4.min.js"></script>
+<script src="js/d3-jetpack.js"></script>
+<script>
+
+// 21166px = 560cm
+// 21366
+
+// --------------------------------------------------
+// init 
+
+// svg
+var svg = d3.select("svg"),
+    margin = {top: 100, right: 100, bottom: 100, left: 100},
+    width = svg.attr("width") - margin.left - margin.right,
+    height = svg.attr("height") - margin.top - margin.bottom,
+    svg_center = svg.append("g").attr("transform", "translate(" + margin.left + "," + (height*.618+margin.top) + ") ");
+
+// scales
+var x = d3.scaleTime().range([50, width-100])
+  .domain([new Date(2002, 0, 1, 0), new Date(2018, 0, 1, 2)]);
+var xm = d3.scaleLinear().range([margin.left, width-margin.right])
+  .domain([0,560]); // cm
+
+var y = d3.scaleLinear().range([0, 800]); // members
+
+var ym = d3.scaleLinear().range([0, height]) 
+  .domain([0,66]); // cm
+
+
+var fontblue = "#054781";
+
+
+// tooltip
+var div = d3.select("body").append("div")
+    .attr("class", "tooltip")
+    .style("opacity", 0);
+
+
+// helper functions
+var parseDate = d3.timeParse("%Y-%m-%d");
+var parseDate2 = d3.timeParse("%d.%m.%Y");
+var parseTime = d3.timeParse("%H:%M:%S");
+var timeformat = d3.timeFormat("%d.%m.%Y");
+
+
+// gridlines 
+function make_x_gridlines() {   
+    return d3.axisBottom(xm)
+        .ticks(50)
+}
+
+function make_y_gridlines() {   
+    return d3.axisLeft(ym)
+        .ticks(10)
+}
+
+
+
+
+// --------------------------------------------------
+// setup data 
+
+// members
+var infos = {};
+var members = [];
+var m_total = [];
+var t, lastJahr, lastDate, groups;
+d3.tsv("Chorentwicklung.csv", function(error, data) { //  test
+  
+  var y = 0;
+  data.forEach(function(d){
+    var date = parseDate2(d.Jahr);
+    if (date == null && d.Jahr.startsWith("Schul")) {
+      date = parseDate2("01.09.20" + d.Jahr.substr(-5,2) );
+    }
+    
+    if (date != null) {
+
+      // save old
+      if (t != 0 && t != 49) m_total.push({
+        date: lastDate,
+        total: t,
+        label: lastJahr,
+        infos: infos,
+        groups: groups
+      });
+
+      
+
+      // new
+      infos = {};
+      lastJahr = d.Jahr;
+      lastDate = date;
+      t = 0;
+      groups = [];
+    }
+
+    infos[d.Chorgruppe] = {
+      boys: d.Jungen,
+      girls: d.Maedchen,
+    }
+    groups.push(d.Chorgruppe);
+    t += +d.Anzahl_gesamt;
+
+  });
+
+  m_total.shift();
+  console.log('m_total', m_total);
+
+  loadYears();
+});
+
+
+// years
+var years = [];
+var loadYears = function(){
+
+  d3.json("years.json", function(error, data) { 
+    if (error) throw error;
+    data.forEach(function(d){
+      d.date = parseDate2(d.date);
+      //d.title = d.title.substr(5);
+    });
+
+    years = data;
+
+    loadTimeline();
+  });
+}
+ 
+
+
+
+// timeline
+var events, summary;
+var images = [];
+var known_bodytexts = [];
+
+var levels = []; // in prgress
+var bigdates = {};
+
+var loadTimeline = function(){
+  d3.json("concerts.json", function(error, data) { 
+    if (error) throw error;
+
+
+    // sort by date_start
+    var data2 = data.sort(function(a, b) { 
+      a = parseDate(a.date_start);
+      b = parseDate(b.date_start);
+      return a > b ? 1 : a == b ? 0 : -1;  
+    });
+    data = data2;
+
+    // split Chorlager
+    var stack1 = [];
+    var stack2 = [];
+    data.forEach(function(d){
+      if (d.eventtype == "Chorlager") stack1.push(d);
+      else stack2.push(d);
+    })
+    data = stack1.concat(stack2);
+
+    // modify object
+    var level = 0;
+    var last_date;
+    var last_title;
+    var last_eventtype;
+    var last_copy_date;
+    var debug = "";
+    data.forEach(function(d){
+
+        d.title = decodeEntities(d.title);
+
+        // find same title
+        if (last_title == d.title) {
+          d.copy = true;
+        } else {
+          d.copy = false;
+        }
+        last_title = d.title;
+
+        // parse times
+        d.date_start = parseDate(d.date_start);
+        d.date_end = parseDate(d.date_end);
+
+        // collect dates with multiple events
+        if (bigdates[d.date_start] >= 0) bigdates[d.date_start]++;
+        else bigdates[d.date_start] = 0;
+
+        // handle copies
+        if (!d.copy){
+              
+              // level
+              var diff = d.date_start - last_date; // ms 
+              diff /= 1000*60*60*24; // days
+              if (diff < 25 && d.eventtype != "Chorlager") {
+                level += 1;
+              } else level = 0;
+
+              if (level > 11) level = 0; // 3
+              
+              d.level = level;
+              last_date = d.date_start ;
+              last_copy_date = d.date_start ;
+              last_eventtype = d.eventtype;
+
+        } else {
+
+                d.title = "";
+                d.bodytext = "";
+                d.level = level;
+
+                d.copy_date = last_copy_date;
+        }
+
+        // y-offset by eventtype 
+        switch (d.eventtype) {
+          // internal
+          case "Chorlager": d.offset = -50; break;
+          //case "Auftritt": d.offset = 60; break;
+          //case "Probe": d.offset = 600; break;
+
+          // public
+          //case "Auftritt": d.offset = -50; break;
+          //case "Konzert": d.offset = -50; break;
+
+          default:  d.offset = -70;
+        }
+
+        // very long bodytexts
+        if (d.bodytext.length > 170) {
+          if (known_bodytexts.includes(d.bodytext)) {
+            d.bodytext = ""
+          } else {
+            known_bodytexts.push(d.bodytext);
+          }
+          
+        }
+
+
+        // images
+        // if (d.media.length > 0){
+        //   d.image_url = d.media[0].url;
+
+        //   var canvas = document.querySelector("canvas"),
+        //     context = canvas.getContext("2d");
+
+        //   var image = new Image;
+
+        //   debug += d.image_url + " ";
+
+        //   var file = d.image_url.split("/");
+        //   file = file[file.length-1];
+
+        //   image.src = "http://localhost/scw_timeline/images/" + file; 
+        //   image.onload = function() {
+        //     context.drawImage(image, 0, 0, 300,200);
+
+        //     var canvasdata = canvas.toDataURL("image/png");
+        //     //console.log('test', canvasdata);
+        //     d3.select("#image_"+d.id).attr("xlink:href", canvasdata);
+        //   }
+        //   images.push({
+        //       id: d.id,
+        //       url: d.image_url,
+        //     });
+
+
+          
+
+        // } 
+
+        // clean up
+        delete d.author;
+        delete d.date_modified;
+        delete d.date_published;
+        delete d.oldEvent;
+        delete d.time_end;
+        delete d.time_start;
+    });
+
+    // dates with mutliple events
+    Object.keys(bigdates).forEach(function(k){
+      if (bigdates[k] == 0) delete bigdates[k];
+    });
+    //console.log(bigdates);
+
+    // list images
+    console.log(data);
+
+    events = data;
+
+    drawIntro();
+    drawMembers();
+    drawYears();
+    drawTimeline();
+
+    postProcess();
+
+
+  });
+}
+
+
+
+
+
+
+
+
+
+// --------------------------------------------------
+// draw 
+
+
+var drawIntro = function(){
+
+  var intro = svg.append("g")
+    .attr("transform", "translate(500,300) rotate(90) ") 
+    .attr("class", "introholder")
+
+      intro.append("text")
+       .attr("class", "year")
+       .attr("font-family", "Alegreya")
+       .attr("font-size", "28px")
+       .text("15 Jahre schola cantorum weimar")
+       .style("fill", "#000000")
+
+
+      intro.append("text")
+       .attr("class", "summary")
+       .attr("font-family", "Alegreya Sans")
+       .attr("font-size", "18px")
+       .text(
+
+
+        "Diese Grafik möchte eine Übersicht über die Entwicklung der schola cantorum weimar geben. Sie zeigt die Entwicklung der Mitgliederzahlen und die " + events.length + " Konzerte und Ereignisse, wie sie auf der Website nachzulesen sind.")
+       .attr("x", 0)
+       .attr("y", 40)
+       .attr("dy", 0)
+       //.attr("transform", "translate(50,24)")
+       .style("fill", "#000000")
+       .call(wrap, 450, 22);
+
+}
+
+var drawMembers = function(){
+
+    // define the line
+    // var valueline_top = d3.line()
+    //     .x(function(d) { return x(d.date); })
+    //     .y(function(d) { return y(-d.total/2); });
+    // var valueline_bottom = d3.line()
+    //     .x(function(d) { return x(d.date); })
+    //     .y(function(d) { return y(d.total/2); });
+
+    // define the area
+    var area_top = d3.area()
+        .x(function(d) { return x(d.date); })
+        .y0(0)
+        .y1(function(d) { return y(-d.total/2); });
+    var area_bottom = d3.area()
+        .x(function(d) { return x(d.date); })
+        .y0(0)
+        .y1(function(d) { return y(d.total/2); });
+
+
+    // Scale the range of the data
+    y.domain([0, d3.max(m_total, function(d) { return d.total; })]);
+
+
+    // add the X gridlines
+      // svg.append("g")     
+      //     .attr("class", "gridlines")
+      //     .attr("transform", "translate("+margin.top+"," + height/2 + ")")
+      //     .call(make_x_gridlines()
+      //         .tickSize(-height)
+      //         //.tickFormat("")
+      //     )
+
+      // add the Y gridlines
+      svg.append("g")     
+          .attr("class", "gridlines")
+          .attr("transform", "translate("+margin.left+"," + margin.top + ")  ")
+          .call(make_y_gridlines()
+              .tickSize(40)
+              //.tickFormat("")
+          )
+
+      // borders: 0 + 70cm
+      svg.append("line")     
+          .attr("class", "borders")
+          .attr("x1", margin.left)
+          .attr("y1", margin.top)
+          .attr("x2", width)
+          .attr("y2", margin.top)
+          .style('stroke', '#637a95')
+          .style('stroke-width', '0.5px')
+
+      svg.append("line")     
+          .attr("class", "borders")
+          .attr("x1", margin.left)
+          .attr("y1", margin.top + height)
+          .attr("x2", width)
+          .attr("y2", margin.top + height)
+          .style('stroke', '#637a95')
+          .style('stroke-width', '0.5px')
+
+
+    // fill between lines
+    svg_center.append("path")
+       .data([m_total])
+       .attr("class", "area")
+       //.style('opacity', .2)
+       .style('fill', "#d2d9e0")
+       .attr("d", area_top);
+
+    svg_center.append("path")
+       .data([m_total])
+       .attr("class", "area")
+       .style('fill', "#d2d9e0")
+       //.style('opacity', .2)
+       //.style('fill', fontblue)
+       .attr("d", area_bottom);
+
+
+    // Add the valueline path.
+ //    svg_center.append("path")
+ //        .data([m_total])
+ //        .attr("class", "members")
+ //        .attr("d", valueline_top)
+ //        .style('fill', 'none')
+ //        .style('stroke', '#000000')
+ //        ;
+ // svg_center.append("path")
+ //        .data([m_total])
+ //        .attr("class", "members")
+ //        .attr("d", valueline_bottom)
+ //        .style('fill', 'none')
+ //        .style('stroke', '#000000')
+ //        ;
+
+    var m0 = svg_center.selectAll("g.member")
+    .data(m_total)
+    .enter()
+
+
+    // circle + line on graph
+    m0.append("circle")
+      .attr("class", "event")
+      .attr("r", 3)
+      .attr("transform", function(d) { return "translate("+ x(d.date) +"," + y(d.total/2) + ")"; })
+      .style("stroke", fontblue)
+    
+    // measure line
+    m0.append("line")
+      .attr("class", "event")
+      .attr("x1", 0)
+      .attr("y1", 0)
+      .attr("x2", 0)
+      .attr("y2", function(d) { return -y(d.total); })
+      .attr("transform", function(d) { return "translate("+ x(d.date) +"," + y(d.total/2) + ")"; })
+      .attr("stroke-dasharray", "5,5")
+      .style("stroke", fontblue)
+
+
+    m0.append("line")
+      .attr("class", "event")
+      .attr("x1", 0)
+      .attr("y1", 0)
+      .attr("x2", 0)
+      .attr("y2", 20)
+      .attr("transform", function(d) { return "translate("+ x(d.date) +"," + y(d.total/2) + ")"; })
+      .style("stroke", fontblue)
+      .style('stroke-width', '0.5px')
+
+
+    // group on bottom
+    var m = m0.append("g")
+      .attr("class", "member")
+      .attr("transform", function(d) { return "translate("+ x(d.date) +"," + (d.label.startsWith("Schul") ? 450 : d.label=="07.01.2002" ? 340 : 180) + ")"; });
+
+    // circle + line
+    m.append("circle")
+      .attr("class", "event")
+      .attr("r", 3)
+      .style("stroke", fontblue)
+      .style("fill", fontblue)
+
+    m.append("line")
+      .attr("class", "event")
+      .attr("x1", 0)
+      .attr("y1", 0)
+      .attr("x2", 0)
+      .attr("y2", -20)
+      .style("stroke", fontblue)
+      .style('stroke-width', '0.5px')
+
+
+    m.append("text")
+     .attr("class", "event2")
+     .attr("font-family", "Alegreya Sans")
+     .attr("font-size", "18px")
+     .text( function(d) { return d.label})
+     .attr("transform", "translate(-20,10) rotate(90)")
+     .style("fill", fontblue)
+     //.style("font-weight", "500")
+
+  m.append("text")
+     .attr("class", "event2")
+     .attr("font-family", "Alegreya")
+     .attr("font-size", "28px")
+     .text( function(d) { return d.total + " Sängerinnen und Sänger"; })
+     .attr("transform", "translate(10,23)")
+     .style("fill", fontblue)
+
+
+
+
+
+    m.append("text")
+     .attr("class", "icon")
+     .attr("font-family", "Ionicons")
+     .attr("font-size", "18px")
+     // .text( function(d) { 
+     //    return "\uF25D".repeat(d.total) ; 
+     //  })
+     .attr("transform", "translate(10,50)")
+     .style("fill", fontblue)
+     .attr("letter-spacing", "3.5px")
+     .tspans(function(d) {
+        
+        var out = [];
+        d.groups.forEach(function(g){
+          out.push(g);
+          var boys = d.infos[g].boys; // F202
+          var girls = d.infos[g].girls;
+          if (girls > 0) out.push( "\uF25D".repeat(girls).match(/.{1,100}/g) );   
+          if (boys > 0) out.push( "\uF202".repeat(boys).match(/.{1,100}/g) );           
+          out.push(" ");
+        });
+
+
+        // 
+
+
+        return out;  
+      });
+
+
+    // Add the X Axis
+    // svg_center.append("g")
+    //   .attr("class", "x-axis")
+    //   .call(d3.axisBottom(x).ticks(d3.timeMonth.every(1)));
+
+    // // Add the Y Axis
+    // svg.append("g")
+    //     .call(d3.axisLeft(y));
+
+}
+
+
+
+
+var drawYears = function(){
+
+  var m0 = svg_center.selectAll("g.years")
+    .data(years)
+    .enter()
+  var m = m0.append("g")
+    .attr("class", "years")
+    .attr("transform", function(d) { return "translate("+ x(d.date) +"," + 400 + ") rotate(90)"; });
+
+    m0.append("line")
+      .attr("class", "years")
+      .attr("x1", function(d){return x(d.date)})
+      .attr("y1", -height)
+      .attr("x2",  function(d){return x(d.date)})
+      .attr("y2", height)
+      .style("stroke", "#000")
+      .style('stroke-width', '0.5px')      
+      .attr("stroke-dasharray", "10,10")
+
+    // m.append("line")
+    //   .attr("class", "years")
+    //   //.attr("x1", function(d) { return -(d.date.getYear() - 103)*20; })
+    //   .attr("x1", -height/2)
+    //   //.attr("x1", 0)
+    //   .attr("y1", 0)
+    //   .attr("x2", height/2)
+    //   .attr("y2", 0)
+    //   .style("stroke", "#000")
+
+    // year
+    m.append("text")
+     .attr("class", "year")
+     .attr("font-family", "Alegreya Sans SC")
+     .attr("font-size", "180px")
+     .style('font-weight', 'bold')
+     .text( function(d) { return d.label; })
+     .attr("transform", "translate(50, 0)")
+     .style("fill", "#bdbdbd")
+
+    var mg = m.append('g')
+      .attr("transform", function(d) { return "translate(50,-60) rotate(-90)"; });
+
+    mg.append("text")
+     .attr("class", "year")
+     .attr("font-family", "Alegreya")
+     .attr("font-size", "28px")
+     .text( function(d) { return d.title; })
+     .attr("transform", "translate(50,24)")
+     .style("fill", "#000000")
+
+
+    mg.append("text")
+     .attr("class", "summary")
+     .attr("font-family", "Alegreya Sans")
+     .attr("font-size", "18px")
+     .text(function(d) {
+        return d.summary; 
+      })
+     .attr("x", 50)
+     .attr("y", 60)
+     .attr("dy", 0)
+     .style("fill", "#000000")
+     .call(wrap, 450, 22);
+
+}
+
+var drawTimeline = function(){
+
+  var defs = svg.append("defs");
+  defs.selectAll("image")
+    .data(images)
+    .enter().append("image")
+      .attr("id", function(d) {return "image_" + d.id; })
+      .attr("width", 49)
+
+
+  // g.append("g")
+  //     .attr("class", "axis axis--x")
+  //     .attr("transform", "translate(0," + (height-460) + ")")
+  //     .call(d3.axisBottom(x).ticks(d3.timeMonth.every(1)) );
+
+
+  // g.append("g")
+  //     .attr("class", "axis axis--x")
+  //     .attr("transform", "translate(0," + (height-30) + ")")
+  //     .call(d3.axisBottom(xm).ticks(50) );
+
+  // g.append("g")
+  //     .attr("transform", "translate(-15,-13)")
+  //     .attr("class", "axis axis--y")
+  //     .call(d3.axisLeft(y))
+    
+
+  // create g on x-axis 
+  var event = svg_center.selectAll("g.event")
+    .data(events)
+    .enter().append("g")
+      .attr("class", "event")
+      .attr("transform", function(d) { return "translate("+ x(d.date_start) +"," + (0) + ")"; });
+
+  // dot + line
+  event.append("circle")
+      .attr("class", "event")
+      .attr("r", 2) 
+      .style("stroke", "#000")
+  
+  event.append("circle")
+      .attr("class", "event")
+      .attr("r", function(d) { return bigdates[d.date_start] > 0 ? 5:0; }) 
+      .style("stroke", "#000")
+      .style("fill", "none")
+      .style("stroke-width", ".5px")
+
+  // event.append("line")
+  //     .attr("class", "event")
+  //     .attr("x1", 0)
+  //     .attr("y1", 0)
+  //     .attr("x2", function(d) { 
+  //       return d.copy ? x(d.copy_date)- x(d.date_start) : 0; 
+  //     } )
+  //     .attr("y2", function(d) { 
+  //       var y = (d.offset > 0 ? 30 : d.copy_date ? -20: -30);
+  //       return y; 
+  //     } )
+  //     .style("stroke", "#000")
+
+  // event.append("line")
+  //     .attr("class", "event")
+  //     .attr("x1", 0)
+  //     .attr("y1", 0)
+  //     .attr("x2", 0)
+  //     .attr("y2", function(d) { 
+  //       var o = d.level*300;
+  //       var y = d.offset + (d.offset > 0 ? o:-o);
+  //       return y; 
+  //     } )
+  //     .style("stroke", "#000")
+
+
+  // // mini line
+  // event.append("line")
+  //     .attr("class", "event")
+  //     .attr("x1", 0)
+  //     .attr("y1", function(d) { 
+  //       var o = d.level*300;
+  //       var y = d.offset + (d.offset > 0 ? o:-o);
+  //       return y; 
+  //     } )
+  //     .attr("x2", -5)
+  //     .attr("y2", function(d) { 
+  //       var o = d.level*300 + 10;
+  //       var y = d.offset + (d.offset > 0 ? o:-o);
+  //       return y; 
+  //     } )
+  //     .style("stroke", "#000")
+
+  var group = event.append("g")
+      .attr("class", "event")
+      .attr("transform", function(d) { 
+        var slotdistance = d.date_start.getYear() > 110 ? 125 : 220;
+
+        var o = d.level*slotdistance + 110; // 390 350
+        var y = d.offset + (d.offset > -60 ? o:-o);
+        var r = 123 + (d.date_start.getYear()-100)*1 ; // 120
+        return "translate(0," + y + ") rotate(" + r + ")"; 
+      })
+      .style("display", function(d) { 
+        return d.copy ? "none":"block"; 
+      })
+
+
+    
+  group.append("circle")
+      .attr("class", "event")
+      .attr("r", 2)
+      .style("stroke", "#000")
+  group.append("circle")
+      .attr("class", "event")
+      .attr("r", function(d) { return bigdates[d.date_start] > 0 ? 5:0; }) 
+      .style("stroke", "#000")
+      .style("fill", "none")
+      .style("stroke-width", ".5px")
+
+  group.append("line")
+      .attr("class", "event")
+      .attr("x1", 0)
+      .attr("y1", 0)
+      .attr("x2", 100)
+      .attr("y2", 0)
+      .style("stroke", "#000")
+      .style("stroke-width", ".5px")
+
+  // group.append("line")
+  //     .attr("class", "event")
+  //     .attr("x1", 0)
+  //     .attr("y1", 0)
+  //     .attr("x2", 0)
+  //     .attr("y2", 20)
+  //     .style("stroke", "#000")
+
+  // type + date
+
+  group.append("text")
+     .attr("class", "event2")
+     .attr("font-family", "Alegreya Sans SC")
+     .attr("font-size", "8px")
+     .attr("x", 6)
+     //.attr("text-anchor", function(d) { return d.offset < 0 ? "start" : "end"; })
+     .attr("y", -5)
+     .text( function(d) { return timeformat(d.date_start) + " —"; })
+     .style("fill", "#000")
+
+  group.append("text")
+     .attr("class", "event2")
+     .attr("font-family", "Alegreya Sans SC")
+     .attr("font-size", "9px")
+     .attr("x", 48)
+     .attr("y", -5)
+     .text( function(d) { return d.eventtype=="Chorlager" ? '':d.eventtype.toLowerCase(); })
+     .style("fill", "#000")
+     .style("letter-spacing", ".5px")
+
+
+  group.append("text")
+     .attr("class", "event_h")
+
+     .attr("id", function(d) { return "event_h_" + d.id; })
+
+     .attr("font-family", "Alegreya SC")
+     .attr("font-size", "9.3px")
+     //.attr("text-anchor", function(d) { return d.offset < 0 ? "start" : "end"; })
+     .attr("x", 6)
+     .attr("y", 11)
+     .style("font-weight", "bold")
+     //.style("letter-spacing", ".5px")
+     .attr("letter-spacing", ".8pt")
+     .text( function(d) { return d.title.toUpperCase(); })
+     .call(wrap, 300, 10);
+
+
+  group.append("text")
+     .attr("class", "event_t")
+     .attr("id", function(d) { return "event_t_" + d.id; })
+     .attr("font-family", "Alegreya Sans")
+     .attr("font-size", "9.3px")
+     //.attr("text-anchor", function(d) { return d.offset < 0 ? "start" : "end"; })
+     .text( function(d) { return decodeEntities(d.bodytext); })
+     .style("fill", "#000")
+     .style("font-weight", "leicht")
+     .attr("x", 6)
+     .attr("y", function(d) { return Math.floor(d.title.length/28+1)*15 - 2; })
+     .call(wrap, 230, 10); // 300
+
+      
+
+  // event.append("text")
+  //    .attr("class", "event")
+  //    .text( function(d) { return d.id; })
+  //    .attr("transform", function(d) { 
+  //       var y = -200 + d.level*40 - 20;
+  //       return "translate(15,"+y+") rotate(-45)"; 
+  //     })  
+    
+
+
+     
+
+  // var img = event.append("g")
+  //   .attr("class", "image")
+  //   .attr("transform", function(d) { 
+  //     var y = d.offset > 0 ? height/2-490 : -height/2;
+  //     return "translate(0," + y + ") rotate(90)"; 
+  //   })
+
+
+    // img.append("use")
+    //  .attr("class", "event2") 
+    //  .attr("xlink:href", function(d) { return "#image_" + d.id; })
+    //  .attr("height", function(d) { return d.image_url ? 100:0; })
+    //  .attr("width", function(d) { return d.image_url ? 100:0; })
+    //  //.attr("x", -1100)
+
+
+
+
+};
+
+
+
+
+var postProcess = function(){
+
+  // introholder
+  // d3.xml("intro_raw.svg").get(function(error, xml) {
+  //   if (error) throw error;
+  //   d3.select(".introholder").selectAll(function() {
+  //     this.appendChild(xml.documentElement);
+  //   })
+    
+  // });
+
+  // format icons 
+  var out = d3.selectAll("text.icon").selectAll(function() {
+    
+    var tspans = this.childNodes;
+    tspans.forEach(function(t){
+      if ( String(t.childNodes[0].textContent).indexOf("chor") > -1) {
+        t.setAttribute("font-family", "Alegreya");
+        t.setAttribute("letter-spacing", 0);
+      }
+      if ( String(t.childNodes[0].textContent).indexOf("\uF25D") > -1) { 
+        t.setAttribute("letter-spacing", "2.65px");
+      }
+      if ( String(t.childNodes[0].textContent).indexOf("\uF202") > -1) { 
+        t.setAttribute("letter-spacing", "3.5px");
+      }
+    })
+
+  });
+
+
+
+  //console.log('postprocess');
+  // find position for bodytexts  with wrapped headlines
+  var out = d3.selectAll(".event_h").selectAll(function() {
+    var h = this.childNodes.length * 10 + 11; // 
+    var tspans = this.nextElementSibling.childNodes;
+    tspans.forEach(function(t){
+      t.setAttribute("y", h+"px");
+    })
+
+    return [
+      this,
+      this.clientHeight,
+      this.nextElementSibling,
+      this.nextElementSibling.getAttribute("y")
+    ];
+  });
+  //console.log(out);
+
+
+
+}
+
+
+
+function wrap(text, width, lineHeight) {
+    text.each(function () {
+        var text = d3.select(this),
+            words = text.text().split(/\s+/).reverse(),
+            word,
+            line = [],
+            lineNumber = 0,
+            //lineHeight = lineHeight || 10, // px
+            x = text.attr("x"),
+            y = text.attr("y"),
+            dy = 0, //parseFloat(text.attr("dy")),
+            tspan = text.text(null)
+                        .append("tspan")
+                        .attr("x", x)
+                        .attr("y", y)
+                        .attr("dy", dy + "px");
+
+        while (word = words.pop()) {
+            line.push(word);
+            tspan.text(line.join(" "));
+            if (tspan.node().getComputedTextLength() > width || word == "#") {
+                line.pop();
+                tspan.text(line.join(" "));
+                line = (word == "#") ? [] : [word];
+                tspan = text.append("tspan")
+                            .attr("x", x)
+                            .attr("y", y)
+                            .attr("dy", ++lineNumber * lineHeight + dy + "px")
+                            .text(word);
+            }
+        }
+    });
+}
+
+
+
+
+
+var decodeEntities = (function() {
+  // this prevents any overhead from creating the object each time
+  var element = document.createElement('div');
+
+  function decodeHTMLEntities (str) {
+    if(str && typeof str === 'string') {
+
+      str = str.replace("</p>", " # \n");
+      str = str.replace("<br>", " # \n");
+      str = str.replace("<br />", " # \n");
+      str = str.trim();
+      if (str.endsWith("#")) str = str.slice(0, -1);
+
+      // strip script/html tags
+      str = str.replace(/<script[^>]*>([\S\s]*?)<\/script>/gmi, '');
+      str = str.replace(/<\/?\w(?:[^"'>]|"[^"]*"|'[^']*')*>/gmi, '');
+      element.innerHTML = str;
+      str = element.textContent;
+      element.textContent = '';
+
+    }
+
+    return str;
+  }
+
+  return decodeHTMLEntities;
+})();
+
+</script>
